@@ -247,11 +247,14 @@ enum Link {
             guard Link.withAddress({ connect(fd, $0, $1) }) else { close(fd); return nil }
         }
 
-        /// After `launch`: waits up to ten seconds for the agent to listen.
+        /// After `launch`: waits up to ten seconds for the agent to listen. One that installs an update first
+        /// takes longer, and the new Orbit then has the request, so the wait goes on while that is under way.
         static func awaited() -> Connection? {
-            let deadline = Date().addingTimeInterval(10)
+            var deadline = Date().addingTimeInterval(10), tries = 0
             while Date() < deadline {
                 if let connection = Connection() { return connection }
+                if tries % 50 == 0, Updater.busy { deadline = Date().addingTimeInterval(10) }
+                tries += 1
                 usleep(10_000)
             }
             return nil

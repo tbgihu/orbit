@@ -15,7 +15,7 @@ enum Runtime {
     /// The terminal's environment as last read (ShellEnvironment).
     static let environmentFile = runDir.appending(path: "environment").path
 
-    /// `<name>.log` holds an orbit's latest run. Orbit's own log is `Orbit.log`, a name no orbit can have.
+    /// `<name>.log` holds an orbit's latest run. Orbit's own update log is `Orbit.log`, a name no orbit can have.
     static func logFile(_ name: String) -> String {
         try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)   // in case it was removed while Orbit runs
         return logDir.appending(path: "\(name).log").path
@@ -67,6 +67,11 @@ enum Runtime {
         for orbit in renamed { _ = rename(path("." + orbit.id), path(orbit.name)) }
     }
 
+    private static func size(_ path: String) -> Int {
+        var info = stat()
+        return stat(path, &info) == 0 ? Int(info.st_size) : 0
+    }
+
     /// Empties a run's log once it passes 10 MB, leaving a line that says so. It goes by the run's own descriptor,
     /// so a log renamed or deleted while the orbit runs stays bounded too. This is safe while the orbit writes
     /// because it appends, so its next line lands at the new end.
@@ -76,6 +81,14 @@ enum Runtime {
         ftruncate(fd, 0)
         let note = "[earlier output trimmed, over 10 MB]\n"
         _ = note.withCString { write(fd, $0, strlen($0)) }
+    }
+
+    /// Trims Orbit's own log, which every update check appends to, to its last 2000 lines once it passes 512 KB.
+    static func trimLog(_ name: String) {
+        let url = URL(filePath: logFile(name))
+        guard size(url.path) > 512 << 10, let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        try? (text.split(separator: "\n", omittingEmptySubsequences: false).suffix(2000).joined(separator: "\n"))
+            .write(to: url, atomically: true, encoding: .utf8)
     }
 
     /// Show Output: a terminal window following the log (its last 1000 lines, then live). It opens a .command file

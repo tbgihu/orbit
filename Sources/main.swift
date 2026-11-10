@@ -1,7 +1,7 @@
 import AppKit
 
 // One binary, three roles:
-//   Orbit.app             the agent: runs orbits, menu bar item, window
+//   Orbit.app             the agent: runs orbits, menu bar item, window, updates
 //   <orbit name>.app      a Spotlight launcher (Info.plist key `OrbitTask`): asks the agent to toggle its orbit, exits
 //   orbit <command>       the command line (see CLI), through the `orbit` link that `make install` creates
 

@@ -29,6 +29,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
 
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var entries: [Entry] = []
+    private var update = UpdateState.none
     /// Open sections, reset to the active orbits whenever that set changes.
     private var expanded = Set<String>()
     private var expandedFor: [String] = []
@@ -53,9 +54,10 @@ final class MenuBar: NSObject, NSMenuDelegate {
     /// Reduce Motion changed, so start or stop the turning right away.
     @objc private func displayOptionsChanged() { render() }
 
-    /// Shows every orbit in display order, active ones open.
-    func show(_ entries: [Entry]) {
+    /// Shows every orbit in display order, active ones open. `update` is a prepared update to restart into.
+    func show(_ entries: [Entry], update: UpdateState) {
         self.entries = entries
+        self.update = update
         let active = entries.filter(\.isActive).map(\.spec.id)
         if active != expandedFor {
             expandedFor = active
@@ -178,6 +180,13 @@ final class MenuBar: NSObject, NSMenuDelegate {
         if entries.filter({ if case .running = $0 { true } else { false } }).count > 1 {
             menu.addItem(action("Stop All", symbol: "stop.circle.fill", #selector(stopAll), nil))
         }
+        if update != .none {
+            menu.addItem(.separator())
+            let title = update.title
+            let item = action(title, symbol: "arrow.triangle.2.circlepath", #selector(restartToUpdate), nil)
+            item.isEnabled = update.actionable
+            menu.addItem(item)
+        }
         menu.addItem(.separator())
         let quit = action("Quit Orbit", symbol: "power", #selector(quitOrbit), nil)
         quit.keyEquivalent = "q"
@@ -277,6 +286,8 @@ final class MenuBar: NSObject, NSMenuDelegate {
     @objc private func openWindow(_ sender: NSMenuItem) { perform(.app(.window)) }
 
     @objc private func openSettings(_ sender: NSMenuItem) { perform(.app(.settings)) }
+
+    @objc private func restartToUpdate(_ sender: NSMenuItem) { perform(.update) }
 
     private func action(_ title: String, symbol: String, _ selector: Selector, _ id: String?) -> NSMenuItem {
         let menuItem = NSMenuItem(title: title, action: selector, keyEquivalent: "")

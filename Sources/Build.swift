@@ -8,6 +8,8 @@ enum Build {
     enum Key: String {
         /// The commit it was built from, with "+" for local changes. A launcher carries its agent's commit.
         case commit = "OrbitCommit"
+        /// The git clone updates come from.
+        case source = "OrbitSource"
         /// A launcher's orbit, by id.
         case task = "OrbitTask"
         /// A launcher's badge (`Glyph.Content.key`), so a changed badge gets a new icon.
@@ -21,6 +23,8 @@ enum Build {
         case config = "OrbitConfig"
         /// The folder Orbit and its launchers are installed in.
         case launchers = "OrbitLaunchers"
+        /// Where an update is built before it is installed.
+        case stage = "OrbitStage"
         /// The folder of the logs.
         case logs = "OrbitLogs"
         /// Launch Services' own tool, which can forget an app.
@@ -43,4 +47,7 @@ enum Build {
     }
 
     static let identifier = value(.identifier)
+
+    /// The commit it was built from, without the "+".
+    static let commit = (Build[.commit] ?? "").trimmingCharacters(in: ["+"])
 }

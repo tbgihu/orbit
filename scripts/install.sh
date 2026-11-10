@@ -16,6 +16,7 @@ if [[ ! -f $config ]]; then
   print "  created   $config from the examples"
 fi
 
+lock
 stop_agent
 place build/Orbit.app
 if ! linked; then

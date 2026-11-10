@@ -1,4 +1,4 @@
-.PHONY: install build identity clean
+.PHONY: install update build identity clean
 
 ## make install    build, signed with Orbit's
 ##                 signing identity (created here), and install to ~/Applications/Orbit, with the orbit command.
@@ -7,6 +7,10 @@ install:
 	@scripts/identity.sh
 	@scripts/build.sh
 	@scripts/install.sh
+
+## make update     pull (fast-forward only) and install when the installed Orbit is behind
+update:
+	@scripts/update.sh
 
 ## make build      build build/Orbit.app only
 build:

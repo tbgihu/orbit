@@ -54,6 +54,9 @@ enum Command {
     case showOutput(String)
     /// The config problem was clicked. Opens orbits.json, or New Orbit when there is no file yet.
     case editConfig
+    case checkForUpdates, updateModeChanged
+    /// Restart to Update, or Download and Install.
+    case update
     case quit
     case windowClosed, settingsClosed, sheetClosed
 
@@ -82,22 +85,38 @@ final class Agent: NSObject, NSApplicationDelegate {
     /// The open New Orbit sheet, retained here because AppKit doesn't keep its buttons' target alive.
     private var sheet: NewOrbit?
     private var settings: Settings?
+    /// A manual Check for Updates: what it is doing, then how it went. Shown in Settings.
+    private var updateActivity = UpdateActivity.none
+    /// Update was clicked while orbits ran. It installs once the last one stops; runs are never interrupted for it.
+    private var updateScheduled = false
+
+    /// The update shown in the title bar, the menu and Settings: one already downloaded, or in Manually mode a newer
+    /// version that a check found.
+    private var updateState: UpdateState {
+        guard updater.ready || Updater.mode == .manual && updater.newer else { return .none }
+        return updateScheduled ? .pending : updater.ready ? .restart : .download
+    }
+    private let updater = Updater()
     /// Where launchers and the command line reach this agent while it runs.
     private var link: Link.Server?
     private var signalSources: [DispatchSourceSignal] = []
     private var terminating = false
+    /// A prepared update is installed before a request Orbit was started with; the new Orbit gets the request.
+    private var updatingOnLaunch = false
     private var deferred: [URL] = []
     /// It is not yet known why this Orbit was started (`classifyLaunch`).
     private var launchUndecided = false
     /// Another Orbit is already running, so this one hands over its requests and quits.
     private var duplicate = false
-    /// Quit without asking (logout, shutdown, sleep, a signal).
+    /// Quit without asking (logout, shutdown, sleep, a signal, an update restart).
     private var quietQuit = false
 
     /// Runs before any URL is delivered (a launch URL arrives before `applicationDidFinishLaunching`).
     func applicationWillFinishLaunching(_ notification: Notification) {
         duplicate = !Runtime.claimInstance()
         guard !duplicate else { return }
+        updatingOnLaunch = updater.installsByItself
+        guard !updatingOnLaunch else { return }
         prepare()
     }
 
@@ -114,6 +133,16 @@ final class Agent: NSObject, NSApplicationDelegate {
         if duplicate {
             handOver(deferred, showWindow: isDefault)
             return
+        }
+        if updatingOnLaunch, !deferred.isEmpty {
+            updater.install(reopen: deferred.map(\.absoluteString))
+            terminating = true
+            NSApp.terminate(nil)
+            return
+        }
+        if updatingOnLaunch {          // no request to pass on
+            updatingOnLaunch = false
+            prepare()
         }
 
         // stop everything on sleep, since tunnels would die anyway
@@ -135,6 +164,8 @@ final class Agent: NSObject, NSApplicationDelegate {
             receive(URL(string: request).flatMap(Command.init).map { [$0] } ?? [], from: "the socket")
         }, left: { [unowned self] in quitIfIdle() })
         NSApp.mainMenu = mainMenu()
+        updater.onChange = { [weak self] in self?.refresh() }
+        updater.start()
 
         if !isDefault {
             classifyLaunch(person: false, "not a default launch")
@@ -165,17 +196,19 @@ final class Agent: NSObject, NSApplicationDelegate {
     private var lastAsked = Date.distantPast
 
     /// Settles, once, why Orbit was started, by the launch itself rather than by when anything arrives. A launch to
-    /// open a URL (a launcher, the command line) or restored at login is not a default launch. A default
+    /// open a URL (a launcher, the command line, an update) or restored at login is not a default launch. A default
     /// launch is a person opening Orbit (Finder, Spotlight, the Dock, `open -a`) when Orbit becomes active, or when
     /// nothing asks for anything within a second, since macOS seldom activates a menu bar app it opens. A
-    /// person gets the window. Orbit.log says how each
+    /// person gets the window, after installing a prepared update, since nothing runs yet. Orbit.log says how each
     /// launch was taken and why.
     private func classifyLaunch(person: Bool, _ signal: String) {
         guard launchUndecided else { return }
         launchUndecided = false
         Runtime.log("launched \(person ? "by a person" : "in the background"): \(signal)")
         guard person else { return }
-        showWindow()
+        guard updater.installsByItself else { return showWindow() }
+        updater.install(reopen: [Request.window.url.absoluteString])
+        quit(quietly: true)
     }
 
     /// Orbit opened again while it runs. A person doing so (Finder, Spotlight, the Dock, `open -a`) gets the window,
@@ -195,7 +228,7 @@ final class Agent: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         let urls = urls.filter { Command(url: $0) != nil }
-        guard !duplicate else { deferred += urls; return }
+        guard !updatingOnLaunch, !duplicate else { deferred += urls; return }
         receive(urls.compactMap(Command.init), from: "a URL")
     }
 
@@ -301,12 +334,18 @@ final class Agent: NSObject, NSApplicationDelegate {
         case .newOrbit: openSheet(editing: nil)
         case .editOrbit(let id): openSheet(editing: id)
         case .editConfig: if Config.exists { Config.edit() } else { openSheet(editing: nil) }
+        case .checkForUpdates: checkForUpdates()
+        case .updateModeChanged:
+            updater.start()
+            showUpdate()
+        case .update: restartToUpdate()
         case .quit: NSApp.terminate(nil)
         case .windowClosed:
             window = nil
             windowsChanged()
         case .settingsClosed:
             settings = nil
+            if updateActivity != .checking, updateActivity != .downloading { updateActivity = .none }
             windowsChanged()
         case .sheetClosed: sheet = nil
         }
@@ -317,13 +356,19 @@ final class Agent: NSObject, NSApplicationDelegate {
     private func jobEnded() {
         guard !terminating else { return }
         refresh()
+        if updateScheduled, jobs.running.isEmpty {                   // install the update clicked earlier
+            updateScheduled = false
+            restartToUpdate()
+            return
+        }
         quitIfIdle()
     }
 
     /// Quits once nothing runs, the window is closed and nobody waits for an answer (a client on
-    /// the socket).
+    /// the socket), installing a prepared update on the way out.
     func quitIfIdle() {
         guard idle else { return }
+        if updater.installsByItself { updater.install(reopen: []) }
         NSApp.terminate(nil)
     }
 
@@ -333,10 +378,25 @@ final class Agent: NSObject, NSApplicationDelegate {
             && window == nil && settings == nil && link?.busy != true && !terminating
     }
 
+    // MARK: Updates
+
+    /// Update was clicked. With orbits running it waits until the last one stops, since they are never interrupted.
+    /// Otherwise Orbit restarts into the update, and the installer makes sure it is the newest version.
+    private func restartToUpdate() {
+        guard updater.ready || updater.newer else { return }
+        guard jobs.running.isEmpty else {
+            updateScheduled = true
+            refresh()
+            return
+        }
+        updater.install(reopen: window != nil ? [Request.window.url.absoluteString] : [])
+        quit(quietly: true)
+    }
+
     // MARK: Interface
 
     /// Re-reads the config when it may have just been edited, which also brings the launchers, logs and settings
-    /// in line with it, and refreshes everything. Cheap: a small file,
+    /// in line with it, and refreshes everything, including an update prepared meanwhile. Cheap: a small file,
     /// the launchers' Info.plists and a few stats.
     private func reloadConfig() {
         Config.reload()
@@ -353,14 +413,16 @@ final class Agent: NSObject, NSApplicationDelegate {
             if jobs.failures.contains(spec.id) { return .failed(spec) }
             return .idle(spec)
         } + jobs.unlisted.map(Entry.running)
-        window?.show(orbits: Config.orbits, jobs: jobs.running, failed: jobs.failures, error: Config.error)
+        window?.show(orbits: Config.orbits, jobs: jobs.running, failed: jobs.failures, error: Config.error,
+                     update: updateState)
+        showUpdate()
         if !entries.contains(where: \.isActive) {
             menuBar?.remove()
             menuBar = nil
             return
         }
         if menuBar == nil { menuBar = MenuBar { [weak self] in self?.perform($0) } }
-        menuBar?.show(entries)
+        menuBar?.show(entries, update: updateState)
     }
 
     /// A task's progress moved on (its whole percentage or its step), so only the badges change, and whoever
@@ -373,7 +435,8 @@ final class Agent: NSObject, NSApplicationDelegate {
 
     private func showWindow() {
         if window == nil { window = Window { [weak self] in self?.perform($0) } }
-        window?.show(orbits: Config.orbits, jobs: jobs.running, failed: jobs.failures, error: Config.error)
+        window?.show(orbits: Config.orbits, jobs: jobs.running, failed: jobs.failures, error: Config.error,
+                     update: updateState)
         window?.present()
     }
 
@@ -398,8 +461,9 @@ final class Agent: NSObject, NSApplicationDelegate {
 
     @objc private func showSettings() {
         if settings == nil {
-            settings = Settings { [weak self] in self?.perform($0) }
+            settings = Settings(updatesAvailable: updater.available) { [weak self] in self?.perform($0) }
         }
+        showUpdate()
         settings?.present()
     }
 
@@ -407,6 +471,9 @@ final class Agent: NSObject, NSApplicationDelegate {
     private func mainMenu() -> NSMenu {
         let app = NSMenu()
         app.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
+        if updater.available {
+            app.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "").target = self
+        }
         app.addItem(.separator())
         app.addItem(withTitle: "Quit Orbit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenu(title: "File")
@@ -437,4 +504,32 @@ final class Agent: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openConfiguration() { Config.edit() }
+
+    /// Refreshes the update section of Settings.
+    private func showUpdate() {
+        settings?.show(update: updateState, activity: updateActivity)
+    }
+
+    /// Check for Updates, from Settings or the Orbit menu (which opens Settings). Checks now whatever the mode and
+    /// shows progress and the result in Settings. In Manually mode it only checks, and Settings then offers
+    /// Download and Install. Otherwise it also downloads, and Settings offers Restart to Update.
+    @objc private func checkForUpdates() {
+        showSettings()
+        guard updateActivity != .checking, updateActivity != .downloading else { return }   // one check at a time
+        updateActivity = .checking
+        showUpdate()
+        updater.onBuilding = { [weak self] in self?.updateActivity = .downloading; self?.showUpdate() }
+        if updater.building { updateActivity = .downloading; showUpdate() }      // joining one already downloading
+        let report: @MainActor @Sendable (Updater.Check) -> Void = { [weak self] check in
+            guard let self else { return }
+            self.updater.onBuilding = nil
+            self.updateActivity = switch check {
+            case .done, .available: .upToDate                 // shown only when no newer version is known
+            case .offline: .offline
+            case .failed: .failed
+            }
+            self.showUpdate()
+        }
+        if Updater.mode == .manual { updater.check(then: report) } else { updater.prepare(then: report) }
+    }
 }

@@ -3,6 +3,7 @@
 # ~/.config/orbit/orbits.json (Sources/Launchers.swift).
 #   SIGN_ID       codesign identity. Default: Orbit's own
 #                 (scripts/identity.sh) if it exists, else ad hoc.
+#   ORBIT_SOURCE  the clone updates come from. Default: this checkout (update.sh sets it when building in a worktree).
 set -euo pipefail
 cd "${0:A:h}/.."
 
@@ -19,13 +20,14 @@ if [[ -z ${SIGN_ID-} && -f $signing/password ]] \
   sign_args=(--keychain $keychain)
 fi
 readonly sign_id=${SIGN_ID:--} sign_name=${sign_name:-${SIGN_ID:--}}
-# The commit it is built from, with "+" for local changes. A folder that isn't a git clone (a downloaded
-# ZIP) still builds, even inside another repository, whose commits are not Orbit's.
+# Updates compare against the commit, with "+" for local changes. A folder that isn't a git clone (a downloaded
+# ZIP) still builds, just without updates, even inside another repository, whose commits are not Orbit's.
 if [[ $(git rev-parse --show-toplevel 2>/dev/null) == $PWD ]]; then
   readonly commit=$(git rev-parse --short=12 HEAD)$(git diff --quiet HEAD || print +)
   readonly version=$(git rev-list --count HEAD)
+  readonly origin=${ORBIT_SOURCE:-$PWD}
 else
-  readonly commit=source version=1
+  readonly commit=source version=1 origin=
 fi
 
 readonly target=$(uname -m)-apple-macos15.0
@@ -43,6 +45,7 @@ plutil -insert CFBundleURLTypes.0.CFBundleURLName -string $identifier $plist
 for key value in $shared; do plutil -insert $key -string ${value#$HOME/} $plist; done
 plutil -replace CFBundleVersion -string "$version" $plist
 plutil -insert OrbitCommit -string "$commit" $plist
+[[ -n $origin ]] && plutil -insert OrbitSource -string "$origin" $plist
 $built/Contents/MacOS/Orbit internal icon "" $built/Contents/Resources/AppIcon.icns
 
 codesign --force --sign "$sign_id" $sign_args --timestamp=none $built 2>/dev/null \

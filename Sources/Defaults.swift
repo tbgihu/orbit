@@ -35,6 +35,12 @@ enum Defaults {
         set { store.set(newValue, forKey: "terminal") }
     }
 
+    /// How updates arrive (`Updater.Mode`'s raw value).
+    static var updates: String? {
+        get { store.string(forKey: "updates") }
+        set { store.set(newValue, forKey: "updates") }
+    }
+
     /// Whether quitting while orbits run asks for confirmation.
     static var askBeforeQuit: Bool {
         get { store.object(forKey: "askBeforeQuit") as? Bool ?? true }

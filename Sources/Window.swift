@@ -2,7 +2,7 @@ import AppKit
 
 /// The window shown when Orbit is opened directly. It lists every orbit: click to start or stop, drag to reorder
 /// (the menu bar follows), right-click to edit or rename. A config problem shows below the list and opens the file.
-/// The title bar has + for New Orbit.
+/// The title bar has + for New Orbit, with Update to its left while an update is ready.
 @MainActor
 final class Window: NSObject, NSWindowDelegate {
     private let perform: (Command) -> Void
@@ -45,17 +45,23 @@ final class Window: NSObject, NSWindowDelegate {
             problem.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
 
-        // + at the trailing end of the title bar
+        // Update (while one is ready) and + at the trailing end of the title bar
+        updateButton.imagePosition = .imageLeading
+        updateButton.symbolConfiguration = .init(pointSize: 10, weight: .medium)
         newButton.toolTip = "New Orbit"
         newButton.setAccessibilityLabel("New Orbit")
-        for button in [newButton] {
+        for button in [updateButton, newButton] {
             if #available(macOS 26, *) { button.bezelStyle = .glass } else { button.bezelStyle = .rounded }
             button.controlSize = .regular
         }
         if #available(macOS 26, *) {
+            updateButton.borderShape = .capsule
             newButton.borderShape = .circle
         }
-        let buttons = NSStackView(views: [newButton])
+        updateButton.isHidden = true
+        let buttons = NSStackView(views: [updateButton, newButton])
+        buttons.spacing = 8
+        buttons.detachesHiddenViews = true
         buttons.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 10)
         titleBar.view = buttons
         titleBar.layoutAttribute = .trailing
@@ -63,6 +69,8 @@ final class Window: NSObject, NSWindowDelegate {
         fitTitleBar()
     }
 
+    private lazy var updateButton = NSButton(title: "Update", image: NSImage(systemSymbolName: "arrow.triangle.2.circlepath",
+                                             accessibilityDescription: nil)!, target: self, action: #selector(restartToUpdate))
     private lazy var newButton = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New Orbit")!,
                                           target: self, action: #selector(newOrbit))
 
@@ -81,7 +89,7 @@ final class Window: NSObject, NSWindowDelegate {
     func present() { window.present() }
 
     /// `failed` are the orbits whose failure the menu bar shows.
-    func show(orbits: [OrbitSpec], jobs: [String: Job], failed: Set<String>, error: String?) {
+    func show(orbits: [OrbitSpec], jobs: [String: Job], failed: Set<String>, error: String?, update: UpdateState) {
         let resized = list.show(orbits, jobs: jobs, failed: failed)
         if shownError != .some(error) {
             shownError = .some(error)
@@ -94,10 +102,21 @@ final class Window: NSObject, NSWindowDelegate {
         } else if resized {
             window.fitToContent(animate: window.isVisible)
         }
+        let (title, tip) = (update.title, update.summary)
+        if updateButton.isHidden != (update == .none) || updateButton.title != title {
+            updateButton.isHidden = update == .none
+            updateButton.title = title
+            updateButton.toolTip = tip
+            updateButton.isEnabled = update.actionable
+            window.titleVisibility = update == .none ? .visible : .hidden   // the title would sit under the button
+            fitTitleBar()
+        }
     }
 
     /// A task's progress moved on: redraws only the badges.
     func showProgress(jobs: [String: Job]) { list.showProgress(jobs) }
+
+    @objc private func restartToUpdate() { perform(.update) }
 
     func windowDidBecomeKey(_ notification: Notification) { perform(.reload) }
 
@@ -477,9 +496,9 @@ extension NSApplication {
     /// In the Dock and ⌘-Tab only while one of Orbit's windows is open.
     func setInDock(_ shown: Bool) { setActivationPolicy(shown ? .regular : .accessory) }
 
-    /// Brings Orbit's windows to the front when they were asked for (opening Orbit or Settings). The cooperative
-    /// `activate()` is refused when Orbit was launched by a process that isn't frontmost (a Spotlight launcher),
-    /// leaving the window behind.
+    /// Brings Orbit's windows to the front when they were asked for (opening Orbit, Settings, Check for Updates,
+    /// the window after Restart to Update). The cooperative `activate()` is refused when Orbit was launched by a
+    /// process that isn't frontmost (a Spotlight launcher, the update script), leaving the window behind.
     /// `activate(ignoringOtherApps:)` still works and has no replacement for this case. Calling it through a
     /// protocol keeps the build free of its deprecation warning.
     func bringToFront() { (self as any ForcedActivation).activate(ignoringOtherApps: true) }

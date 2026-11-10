@@ -1,31 +1,76 @@
 import AppKit
 
-/// Orbit's settings (⌘,): the terminal Show Output opens in.
+/// What a manual Check for Updates is doing, or how it went. Shown in Settings.
+enum UpdateActivity: Equatable { case none, checking, downloading, upToDate, offline, failed }
+
+/// Orbit's settings (⌘,): how updates arrive, Check for Updates with its progress and result, the update to
+/// install and the terminal Show Output opens in.
+/// Updates are handled here in place, with no other windows.
 @MainActor
 final class Settings: NSObject, NSWindowDelegate {
     private let perform: (Command) -> Void
+    private let updatesAvailable: Bool
 
     private let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: true)
+    private let mode = NSPopUpButton()
+    private let note = NSTextField(wrappingLabelWithString: "")
+    /// Download and Install (Manually mode) or Restart to Update. Greyed out while orbits run.
+    private let install = NSButton(title: "Download and Install", target: nil, action: nil)
+    private let check = NSButton(title: "Check for Updates", target: nil, action: nil)
+    /// "Checking for Updates…" over an indeterminate bar, then how it went.
+    private let status = NSTextField(wrappingLabelWithString: "")
+    private let bar = NSProgressIndicator()
+    private let progress = NSStackView()
     private var grid = NSGridView()
     private let terminal = NSPopUpButton()
 
-    init(perform: @escaping (Command) -> Void) {
-        self.perform = perform
+    init(updatesAvailable: Bool, perform: @escaping (Command) -> Void) {
+        (self.perform, self.updatesAvailable) = (perform, updatesAvailable)
         super.init()
         window.title = "Orbit Settings"
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         window.delegate = self
 
+        mode.addItems(withTitles: Updater.Mode.allCases.map(\.title))
+        mode.selectItem(at: Updater.Mode.allCases.firstIndex(of: Updater.mode) ?? 0)
+        mode.target = self
+        mode.action = #selector(changed)
+        note.textColor = .secondaryLabelColor
+        note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        note.preferredMaxLayoutWidth = 240
+        check.target = self
+        check.action = #selector(checkNow)
+        status.preferredMaxLayoutWidth = 240
+        bar.style = .bar
+        bar.isIndeterminate = true
+        bar.controlSize = .small
+        progress.setViews([status, bar], in: .leading)
+        progress.orientation = .vertical
+        progress.alignment = .leading
+        progress.spacing = 6
+        install.target = self
+        install.action = #selector(installNow)
+        install.keyEquivalent = "\r"                                      // the primary action, drawn blue
+
         terminal.target = self
         terminal.action = #selector(terminalChanged)
         fillTerminals()
 
         grid = NSGridView(views: [
+            [NSTextField(labelWithString: "Updates:"), mode],
+            [NSGridCell.emptyContentView, note],
+            [NSGridCell.emptyContentView, progress],
+            [NSGridCell.emptyContentView, install],
+            [NSGridCell.emptyContentView, check],
             [NSTextField(labelWithString: "Terminal:"), terminal],
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowSpacing = 8
+        row(progress).topPadding = 6
+        row(progress).isHidden = true                                    // until a check runs or an update is known
+        row(install).isHidden = true                                     // until a newer version is known
+        for view in [terminal] { row(view).topPadding = 14 }
         terminal.toolTip = "Show Output opens a new window in this terminal."
         grid.translatesAutoresizingMaskIntoConstraints = false
         let content = NSView()
@@ -36,12 +81,71 @@ final class Settings: NSObject, NSWindowDelegate {
             grid.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             grid.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -20),
             grid.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+            mode.widthAnchor.constraint(equalToConstant: 170),
+            bar.widthAnchor.constraint(equalToConstant: 240),
             terminal.widthAnchor.constraint(equalToConstant: 170),
         ])
+        if !updatesAvailable {                                            // built from a ZIP, so there is nothing to update from
+            mode.isEnabled = false
+            check.isEnabled = false
+        }
+        describe()
         window.setContentSize(content.fittingSize)
     }
 
     func present() { window.present() }
+
+    /// The grid row that holds `view`.
+    private func row(_ view: NSView) -> NSGridRow { grid.cell(for: view)!.row! }
+
+    /// Describes the selected mode in one line.
+    private func describe() {
+        note.stringValue = switch Updater.mode {
+        case .automatic: "Downloads updates automatically and installs them when no orbit is running."
+        case .downloadOnly: "Downloads updates automatically and installs them when you click Restart to Update."
+        case .manual: "Checks only when you click Check for Updates."
+        }
+    }
+
+    @objc private func changed() {
+        Updater.mode = Updater.Mode.allCases[mode.indexOfSelectedItem]
+        describe()
+        perform(.updateModeChanged)
+    }
+
+    @objc private func checkNow() { perform(.checkForUpdates) }
+
+    /// Greys the button at once. It shows "Installing…" while Orbit quits into the installer, or the pending state
+    /// that show(update:activity:) sets when orbits are running.
+    @objc private func installNow() {
+        install.isEnabled = false
+        install.title = "Installing…"
+        perform(.update)
+    }
+
+    /// Updates the update section in place: a check's progress and result, and once a newer version is known, its
+    /// summary and button (Download and Install, or Restart to Update once downloaded), greyed while it waits for
+    /// the orbits to stop. Check for Updates is greyed while a check runs.
+    func show(update: UpdateState, activity: UpdateActivity) {
+        let busy = activity == .checking || activity == .downloading
+        check.isEnabled = !busy && mode.isEnabled
+        busy ? bar.startAnimation(nil) : bar.stopAnimation(nil)
+        bar.isHidden = !busy
+        status.stringValue = switch activity {
+        case .checking: "Checking for Updates…"
+        case .downloading: "Downloading Update…"
+        case _ where update != .none: update.summary
+        case .upToDate: "Orbit is up to date."
+        case .offline: "Couldn’t check for updates. Try again when online."
+        case .failed: "Couldn’t check for updates. Details are in \(Runtime.logFile("Orbit").abbreviatingTilde)."
+        case .none: ""
+        }
+        row(progress).isHidden = status.stringValue.isEmpty
+        row(install).isHidden = update == .none || busy
+        install.isEnabled = update.actionable
+        install.title = update == .none ? install.title : update.title
+        window.fitToContent()
+    }
 
     // MARK: Terminal
 

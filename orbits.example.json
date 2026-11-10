@@ -1,0 +1,42 @@
+{
+  "$schema": "./orbits.schema.json",
+  "orbits": [
+    {
+      "id": "web",
+      "name": "web preview",
+      "badge": {
+        "shape": "card",
+        "text": "WEB"
+      },
+      "cwd": "~/Public",
+      "command": "python3 -m http.server 8080 --bind 127.0.0.1",
+      "url": "http://localhost:8080"
+    },
+    {
+      "id": "awk",
+      "name": "keep awake",
+      "badge": {
+        "symbol": "cup.and.saucer"
+      },
+      "command": "caffeinate -dis",
+      "kind": "service"
+    },
+    {
+      "id": "fcs",
+      "name": "focus timer",
+      "badge": "25m",
+      "command": "sleep 1500 && osascript -e 'display notification \"Time for a break\" with title \"Focus timer\"'"
+    },
+    {
+      "id": "nb",
+      "name": "remote notebook",
+      "badge": {
+        "shape": "cards",
+        "text": "NB"
+      },
+      "command": "ssh -tt -L 8888:localhost:8888 myserver 'jupyter lab --no-browser --port 8888'",
+      "url": "http://localhost:8888",
+      "openInBrowser": false
+    }
+  ]
+}

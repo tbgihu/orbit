@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Orbit orbits",
+  "description": "The background tasks Orbit starts from Spotlight and shows in the menu bar, kept in ~/.config/orbit/orbits.json.",
+  "type": "object",
+  "required": [
+    "orbits"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "orbits": {
+      "description": "In menu bar and window order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/orbit"
+      }
+    }
+  },
+  "$defs": {
+    "orbit": {
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "1 to 4 letters or digits, unique. Orbit knows an orbit by its id: to rename one, change its name and keep its id. Also the default badge.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9]{1,4}$"
+        },
+        "name": {
+          "description": "What you type in Spotlight. Orbit creates a launcher app with this name. Must be unique, without \"/\", and not \"Orbit\".",
+          "type": "string",
+          "pattern": "^[^/]+$"
+        },
+        "badge": {
+          "description": "What the orbit shows inside its ring in the menu bar, window and icon. Defaults to the id as text.",
+          "$ref": "#/$defs/badge"
+        },
+        "command": {
+          "description": "Run by zsh with the same environment as your terminal, in its own process group, so stopping it stops everything it started. When it ends by itself, the orbit shows Done, or Failed with its exit code. Output goes to ~/Library/Logs/Orbit/<name>.log. Either this or script.",
+          "type": "string",
+          "minLength": 1
+        },
+        "script": {
+          "description": "A script file anywhere (~ is expanded). Run directly when executable, otherwise with the interpreter named on its #! line, or /bin/sh. Runs in its own folder unless cwd is set. Either this or command.",
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "description": "service runs until stopped (a server, a tunnel, caffeinate). task runs to completion (a backup, a script). If left out, Orbit decides from earlier runs, then the command (rsync, curl and make are tasks; caffeinate, ssh tunnels and http.server are services), then url. `orbit status <orbit>` shows the result.",
+          "enum": [
+            "service",
+            "task"
+          ]
+        },
+        "animate": {
+          "description": "How the badge's satellite moves. auto: while starting (until url answers) and while a task runs. starting: only while starting. always: also while a service runs. off: never. Defaults to auto.",
+          "enum": [
+            "auto",
+            "starting",
+            "always",
+            "off"
+          ]
+        },
+        "cwd": {
+          "description": "The folder it runs in, where relative paths start (~ is expanded). Defaults to a script's own folder, or your home folder for a command.",
+          "type": "string"
+        },
+        "openInBrowser": {
+          "description": "If this orbit serves a web page, it opens in your browser as soon as it answers. Every http(s) address in url opens; of the addresses Orbit finds by itself, only those that serve HTML. When false, the command can't open web pages either. Defaults to true.",
+          "type": "boolean"
+        },
+        "url": {
+          "description": "The address this orbit answers at, or several separated by commas (\"http://localhost:3000, http://localhost:6006\"): http(s)://, vnc://, ssh://, or tcp://host:port. The orbit counts as starting until the first address responds (any HTTP response for http, the greeting for vnc and ssh, a connection for tcp). The menu can open and copy each address. If left out, a service's addresses are found from the ports it listens on while it starts.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "command"
+          ]
+        },
+        {
+          "required": [
+            "script"
+          ]
+        }
+      ]
+    },
+    "badge": {
+      "oneOf": [
+        {
+          "title": "Text",
+          "description": "1 to 4 characters, e.g. \"25m\", \"api\".",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4
+        },
+        {
+          "title": "Icon",
+          "description": "Any SF Symbol, by name (the SF Symbols app lists them), e.g. \"globe\", \"terminal\", \"server.rack\", \"cup.and.saucer\", \"chart.bar.xaxis\", \"doc.text\", \"photo.stack\", \"bolt\".",
+          "type": "object",
+          "required": [
+            "symbol"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "symbol": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "title": "Icon and text",
+          "description": "A shape with a short text cut out of it.",
+          "type": "object",
+          "required": [
+            "shape"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "shape": {
+              "enum": [
+                "cards",
+                "card",
+                "pill",
+                "disc",
+                "file"
+              ],
+              "description": "cards: two stacked panels (up to 2 characters). card: one panel (3). pill: a capsule (3). disc: a filled circle (3). file: a page with a folded corner (2)."
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 3
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "shape": {
+                    "enum": [
+                      "cards",
+                      "file"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "text": {
+                    "maxLength": 2
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

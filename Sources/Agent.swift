@@ -4,7 +4,7 @@ import AppKit
 /// launcher, the command line (`orbit toggle <orbit>`) and anything else outside Orbit name one in a URL,
 /// `orbit://toggle/<id>`. The URLs, the subcommands and their help are all made from this list, so a new action
 /// only has to say what it does (`Agent.perform`), how it reads in help (`summary`), when it is done
-/// (`CLI.verdict`); the compiler asks for each.
+/// (`CLI.verdict`) and which intent asks for it (`intent`); the compiler asks for each.
 enum Action: String, CaseIterable {
     case start, stop, restart, toggle
     /// Clears a failed run's "!".
@@ -57,6 +57,11 @@ enum Command {
     case checkForUpdates, updateModeChanged
     /// Restart to Update, or Download and Install.
     case update
+    /// Orbit or its Settings came to the front, when Xcode may have just been installed or licensed, or an Apple
+    /// Development certificate created (`Updater.poll`).
+    case siri
+    /// Add Now: adds Siri support at once, when no orbit runs.
+    case addSiri
     /// Uninstall Orbit, confirmed in Settings: quits, then everything Orbit put on this Mac is removed.
     case uninstall
     case quit
@@ -142,7 +147,7 @@ final class Agent: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
-        if updatingOnLaunch {          // no request to pass on
+        if updatingOnLaunch {          // no request to pass on, and an intent is answered by this very process
             updatingOnLaunch = false
             prepare()
         }
@@ -185,11 +190,23 @@ final class Agent: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         classifyLaunch(person: true, "activated")
+        if !terminating { perform(.siri) }
     }
 
     func applicationWillTerminate(_ notification: Notification) { classifyLaunch(person: false, "never activated") }
 
-    /// Something asked Orbit for something (a URL or the socket), so this launch was not a person opening it.
+    /// An intent asked Orbit for something (`asked(by:)`). When an intent is what started Orbit, macOS (linkd)
+    /// holds Orbit while Siri or Shortcuts use it, then quits it itself once Orbit is idle
+    /// (`applicationShouldTerminate`), so Orbit leaves quitting to macOS. Quitting earlier would end what Siri or
+    /// Shortcuts still hold, which they report as a crash.
+    func askedByIntent() {
+        if launchUndecided { heldByIntents = true }
+        asked(by: "an intent")
+    }
+    /// macOS started Orbit for an intent and quits it when done (`askedByIntent`).
+    private var heldByIntents = false
+
+    /// Something asked Orbit for something (a URL, the socket, an intent), so this launch was not a person opening it.
     func asked(by asker: String) {
         lastAsked = .now
         classifyLaunch(person: false, "asked by \(asker)")
@@ -200,7 +217,8 @@ final class Agent: NSObject, NSApplicationDelegate {
     /// Settles, once, why Orbit was started, by the launch itself rather than by when anything arrives. A launch to
     /// open a URL (a launcher, the command line, an update) or restored at login is not a default launch. A default
     /// launch is a person opening Orbit (Finder, Spotlight, the Dock, `open -a`) when Orbit becomes active, or when
-    /// nothing asks for anything within a second, since macOS seldom activates a menu bar app it opens. A
+    /// nothing asks for anything within a second, since macOS seldom activates a menu bar app it opens. App Intents
+    /// for Siri, Shortcuts and Spotlight ask right away, and a build without a Team ID has none (`Build.siri`). A
     /// person gets the window, after installing a prepared update, since nothing runs yet. Orbit.log says how each
     /// launch was taken and why.
     private func classifyLaunch(person: Bool, _ signal: String) {
@@ -215,6 +233,7 @@ final class Agent: NSObject, NSApplicationDelegate {
 
     /// Orbit opened again while it runs. A person doing so (Finder, Spotlight, the Dock, `open -a`) gets the window,
     /// at once when macOS activates Orbit, else after a second in which nothing asked for anything, as at launch.
+    /// App Intents open it in the background each time one runs, and ask right away.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         guard !NSApp.isActive else { showWindow(); return false }
         let reopened = Date.now
@@ -232,6 +251,12 @@ final class Agent: NSObject, NSApplicationDelegate {
         let urls = urls.filter { Command(url: $0) != nil }
         guard !updatingOnLaunch, !duplicate else { deferred += urls; return }
         receive(urls.compactMap(Command.init), from: "a URL")
+    }
+
+    /// Every orbit as it stands, for an intent, with the config read again first as for a request over the socket.
+    func snapshot() -> Snapshot {
+        reloadConfig()
+        return Snapshot(jobs)
     }
 
     /// Requests from outside, by URL or over the socket. The config is read again first, since whoever asks
@@ -270,6 +295,12 @@ final class Agent: NSObject, NSApplicationDelegate {
     /// off), then the orbits are stopped in the background (SIGTERM, then SIGKILL after a grace period) and Orbit
     /// quits once they are gone, so the interface never blocks.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if quitBy("linkd") {           // done with an intent (`askedByIntent`), which may have started an orbit
+            heldByIntents = false
+            Runtime.log(idle ? "quit by macOS after an intent" : "kept running after an intent: not idle")
+            guard idle else { return .terminateCancel }
+            if updater.installsByItself { updater.install(reopen: []) }
+        }
         let running = jobs.inOrder
         guard !running.isEmpty || !jobs.lingering.isEmpty else { terminating = true; return .terminateNow }
         if !running.isEmpty, !quietQuit, !systemQuit(), Defaults.askBeforeQuit {
@@ -296,6 +327,14 @@ final class Agent: NSObject, NSApplicationDelegate {
             CFRunLoopWakeUp(CFRunLoopGetMain())
         }
         return .terminateLater
+    }
+
+    /// Whether the quit request came from the process named `name`, which sent it as an Apple event.
+    private func quitBy(_ name: String) -> Bool {
+        guard let pid = quitRequest("spid")?.int32Value, pid > 0 else { return false }
+        var buffer = [UInt8](repeating: 0, count: 64)
+        let length = Int(proc_name(pid, &buffer, UInt32(buffer.count)))
+        return length > 0 && buffer.prefix(length).elementsEqual(name.utf8)
     }
 
     /// Quitting because macOS logs out, restarts or shuts down (no one to ask).
@@ -341,6 +380,8 @@ final class Agent: NSObject, NSApplicationDelegate {
             updater.start()
             showUpdate()
         case .update: restartToUpdate()
+        case .siri: updater.poll()
+        case .addSiri: addSiriNow()
         case .uninstall:
             guard jobs.running.isEmpty, Uninstall.start() else { return }
             quit(quietly: true)
@@ -369,10 +410,10 @@ final class Agent: NSObject, NSApplicationDelegate {
         quitIfIdle()
     }
 
-    /// Quits once nothing runs, the window is closed and nobody waits for an answer (a client on
+    /// Quits once nothing runs, the window is closed and nobody waits for an answer (an intent, or a client on
     /// the socket), installing a prepared update on the way out.
     func quitIfIdle() {
-        guard idle else { return }
+        guard idle, !heldByIntents else { return }
         if updater.installsByItself { updater.install(reopen: []) }
         NSApp.terminate(nil)
     }
@@ -380,7 +421,7 @@ final class Agent: NSObject, NSApplicationDelegate {
     /// Nothing runs, waits, is shown or is being asked, so Orbit has nothing to stay for.
     private var idle: Bool {
         jobs.running.isEmpty && jobs.restarting.isEmpty && jobs.waiting.isEmpty && jobs.failures.isEmpty
-            && window == nil && settings == nil && link?.busy != true && !terminating
+            && window == nil && settings == nil && Intents.pending == 0 && link?.busy != true && !terminating
     }
 
     // MARK: Updates
@@ -394,7 +435,16 @@ final class Agent: NSObject, NSApplicationDelegate {
             refresh()
             return
         }
-        updater.install(reopen: window != nil ? [Request.window.url.absoluteString] : [])
+        updater.install(reopen: window != nil ? [Request.window.url.absoluteString] : [], update: true)
+        quit(quietly: true)
+    }
+
+    /// Add Now: the install that happens by itself once no orbit runs, at once. Orbit quits into the installer,
+    /// which builds Siri support unless the stage has it already, and reopens Orbit's windows.
+    private func addSiriNow() {
+        guard updater.siri.state == .adding, updater.available, jobs.running.isEmpty else { return }
+        let open = (window != nil ? [Request.window] : []) + (settings != nil ? [Request.settings] : [])
+        updater.install(reopen: open.map(\.url.absoluteString))
         quit(quietly: true)
     }
 
@@ -466,7 +516,7 @@ final class Agent: NSObject, NSApplicationDelegate {
 
     @objc private func showSettings() {
         if settings == nil {
-            settings = Settings(updatesAvailable: updater.available) { [weak self] in self?.perform($0) }
+            settings = Settings(updatesAvailable: updater.available, siri: updater.siri) { [weak self] in self?.perform($0) }
         }
         showUpdate()
         settings?.present()
@@ -539,6 +589,7 @@ final class Agent: NSObject, NSApplicationDelegate {
             case .failed: .failed
             }
             self.showUpdate()
+            self.updater.poll()                               // Xcode too, and Siri support when due
         }
         if Updater.mode == .manual { updater.check(then: report) } else { updater.prepare(then: report) }
     }

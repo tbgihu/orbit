@@ -3,15 +3,21 @@
 #
 #   update.sh            `make update`: prepare, then install right away. Only when no orbit runs.
 #   update.sh check      fetch and compare; exits 10 when a newer version than the installed Orbit exists, 3 offline
-#   update.sh prepare
+#   update.sh prepare [--installed]
 #                        fetch, and when the upstream (or this clone) is ahead of the installed Orbit, build that
 #                        commit into the stage. Nothing installed changes. The agent runs this every 2 h. Exits 3
-#                        when offline.
-#   update.sh install [--after <pid>] [<url>…]
+#                        when offline. With --installed, build the installed commit instead, without fetching.
+#   update.sh install [--after <pid>] [--installed] [<url>…]
 #                        wait for <pid> (the agent) to exit, prepare again unless the stage was readied in the last
-#                        10 minutes, fast-forward the clone, put the
+#                        10 minutes with all it can have (always with --installed), fast-forward the clone, put the
 #                        new Orbit.app in place, then hand it each <url> (the requests the old one was started with,
 #                        or its windows).
+#
+# Siri support comes like an update: once this Mac has Xcode and an Apple Development certificate (`xcode` in
+# lib.sh), every build has it, so when it is all that is new, prepare builds the installed commit with it, and
+# one install brings both. It is no new version, so `check` ignores it. Outside Automatically mode the agent adds
+# it with --installed, which never brings in a newer commit. A build is named by its commit, then " intents" when
+# it has Siri support (`identity` in lib.sh).
 #
 # Never moves the clone backwards or across local commits, and never prompts, since there is no terminal.
 set -euo pipefail
@@ -21,15 +27,21 @@ git rev-parse --git-dir >/dev/null 2>&1 || { print "  not a git clone, so there 
 export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15"
 
 # Sets `target` to the build to install and `current` when the installed Orbit (`have`) is that already. The
-# commit is the upstream's after a fetch, or this clone's if it is ahead.
+# commit is the upstream's after a fetch, or this clone's if it is ahead, or with --installed the installed one.
+# Siri support is in it when this Mac can add it, and in the installed commit when it has it already.
 latest() {
   mkdir -p $stage
   have=$(installed)
-  touch $stage/checked
-  git fetch --quiet 2>/dev/null || { offline=1; print "  could not fetch, so using the commits already here" }
-  local head=$(git rev-parse --short=12 HEAD)
-  target=$(git rev-parse --short=12 '@{upstream}' 2>/dev/null) || target=$head
-  git merge-base --is-ancestor $head $target 2>/dev/null || target=$head    # local commits: build those
+  if [[ ${1-} == --installed && -n $have ]]; then
+    target=${have% intents}
+  else
+    touch $stage/checked
+    git fetch --quiet 2>/dev/null || { offline=1; print "  could not fetch, so using the commits already here" }
+    local head=$(git rev-parse --short=12 HEAD)
+    target=$(git rev-parse --short=12 '@{upstream}' 2>/dev/null) || target=$head
+    git merge-base --is-ancestor $head $target 2>/dev/null || target=$head    # local commits: build those
+  fi
+  if [[ $have == "$target intents" ]] || xcode >/dev/null; then target+=" intents"; fi
   current=false
   [[ $have == $target ]] && current=true
   true
@@ -39,14 +51,14 @@ latest() {
 check() {
   local target current have
   latest
-  if [[ $target == $have ]]; then print "  up to date ($have)"; return 0; fi
+  if [[ ${target% intents} == ${have% intents} ]]; then print "  up to date ($have)"; return 0; fi
   print "  available $target"
   return 10
 }
 
 prepare() {
   local target current have
-  latest
+  latest ${1-}
   rm -rf $stage/src                                               # left by a build that failed or was interrupted
 
   if $current; then
@@ -63,7 +75,7 @@ prepare() {
   print "  building  $target"
   rm -rf $stage/Orbit.app $stage/commit
   git worktree prune                                              # forget one that was deleted, by an uninstall too
-  git worktree add --quiet --detach $stage/src $target
+  git worktree add --quiet --detach $stage/src ${target% intents}
   if ! (repo=$PWD; cd $stage/src && ORBIT_SOURCE=$repo scripts/build.sh >/dev/null); then
     git worktree remove --force $stage/src
     print "  could not build $target"
@@ -73,6 +85,14 @@ prepare() {
   $lsregister -u $stage/Orbit.app 2>/dev/null || true             # not a candidate for orbit:// links
   git worktree remove --force $stage/src
   identity $stage/Orbit.app > $stage/commit
+  # A build of the installed commit with no more Siri support than the installed Orbit is discarded: no news
+  # when Xcode failed at Siri support, a loss when build.sh fell back to Orbit Local Signing, as after the Apple
+  # Development certificate expired. The agent applies the same rule (`staged` in Sources/Updater.swift).
+  if [[ $(<$stage/commit) == $have || "$(<$stage/commit) intents" == $have ]]; then
+    print "  kept      $have (the build is $(<$stage/commit))"
+    rm -rf $stage/Orbit.app $stage/commit
+    return
+  fi
   print "  ready     $(<$stage/commit)"
 }
 
@@ -81,16 +101,20 @@ install() {
     await_exit $2
     shift 2
   fi
+  local installed=
+  [[ ${1-} == --installed ]] && { installed=$1; shift }
   # Install the latest commit, or what is staged when offline. A stage that a prepare built or confirmed in the
-  # last 10 minutes counts as the latest, unlike one that a later `check` merely fetched past.
+  # last 10 minutes counts as the latest, unlike one that a later `check` merely fetched past, unless it lacks
+  # Siri support that Xcode can now add. --installed always prepares again, which confirms the stage.
   offline=0
   local fresh=($stage/commit(Nmm-10))
-  if [[ ! -d $stage/Orbit.app || -z $fresh ]]; then
-    prepare || true
+  if [[ -n $installed || ! -d $stage/Orbit.app || -z $fresh ]] \
+     || { [[ $(<$stage/commit) != *" intents" ]] && xcode >/dev/null }; then
+    prepare $installed || true
   fi
   if [[ -d $stage/Orbit.app ]]; then
     local target=$(<$stage/commit)
-    if git merge --ff-only --quiet $target 2>/dev/null; then
+    if git merge --ff-only --quiet ${target% intents} 2>/dev/null; then
       place $stage/Orbit.app
     else
       print "  could not fast-forward to $target, so kept $(installed)"
@@ -101,7 +125,7 @@ install() {
 }
 
 case ${1-} in
-  prepare) lock; offline=0; prepare; exit $(( offline ? 3 : 0 )) ;;     # 3: could not reach the remote
+  prepare) lock; offline=0; prepare ${2-}; exit $(( offline ? 3 : 0 )) ;;     # 3: could not reach the remote
   check) lock; offline=0; check && rc=0 || rc=$?; (( offline )) && exit 3; exit $rc ;;   # 10: one is available
   install) shift; lock; install $@ ;;
   "")
@@ -112,6 +136,6 @@ case ${1-} in
     stop_agent
     install
     ;;
-  *) print -u2 "usage: update.sh [check | prepare | install [--after <pid>] [<url>…]]"
+  *) print -u2 "usage: update.sh [check | prepare [--installed] | install [--after <pid>] [--installed] [<url>…]]"
      exit 64 ;;
 esac

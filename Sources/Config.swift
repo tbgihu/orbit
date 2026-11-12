@@ -137,7 +137,7 @@ enum Config {
 
     /// Brings what Orbit keeps of each orbit in line with the file just read, by id: an id with another name is
     /// a rename (its log is renamed and its launcher replaced; order, last run and the rest stay), an id that is
-    /// gone takes everything of its orbit with it, and a new id starts with nothing.
+    /// gone takes everything of its orbit with it, and a new id starts with nothing. Siri hears of the change.
     /// It runs with every read and goes by what is on disk, so an edit made while Orbit ran, was quit or had
     /// crashed is treated the same, and renaming an orbit is nothing more than changing its name in the file.
     /// Not when the file has a problem, since it then says nothing about which orbits exist.
@@ -145,6 +145,7 @@ enum Config {
         Defaults.prune(keeping: Set(orbits.map(\.id)))
         Runtime.reconcileLogs(orbits)
         Launchers.syncInBackground(orbits)
+        Intents.refresh(orbits)
     }
 
     static func load(_ file: URL) throws -> [OrbitSpec] { try load(data: Data(contentsOf: file)) }

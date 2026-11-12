@@ -47,6 +47,12 @@ enum Defaults {
         set { store.set(newValue, forKey: "askBeforeQuit") }
     }
 
+    /// The build and the orbits macOS was last told of for Siri (`Intents.refresh`).
+    static var shortcuts: String? {
+        get { store.string(forKey: "shortcuts") }
+        set { store.set(newValue, forKey: "shortcuts") }
+    }
+
     /// Forgets what is kept of orbits that are no longer in the config.
     static func prune(keeping ids: Set<String>) {
         let runs = lastRun, ended = endedByItself, hidden = hiddenInMenuBar, order = order

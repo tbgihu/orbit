@@ -8,7 +8,8 @@
 # is never a "codesign wants to use" prompt. It is not in your search list, so Keychain Access doesn't show it, and
 # the password file is only used to unlock it.
 #
-# Skipped when SIGN_ID names another identity. `make uninstall` removes it.
+# build.sh signs with an Apple Development certificate instead when there is one (`development_identity` in lib.sh),
+# and with this identity otherwise. Skipped when SIGN_ID names another identity. `make uninstall` removes it.
 set -euo pipefail
 source "${0:A:h}/lib.sh"
 

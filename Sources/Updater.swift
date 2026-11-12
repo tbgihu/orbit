@@ -36,6 +36,11 @@ enum UpdateState: Equatable {
 /// - **install**, once a stage is ready: Orbit quits, the installer fast-forwards the clone, swaps in the staged
 ///   app and reopens what was open. This happens automatically when nothing would be interrupted (a fresh launch,
 ///   or the last orbit stopping); otherwise you choose Restart to Update.
+///
+/// Siri support comes the same way, in every mode as an automatic update would (`poll`). Once Xcode and an Apple
+/// Development certificate can add it (`SiriSupport`) every build has it, so in Automatically mode one install
+/// brings both a new version and Siri support. In the other modes it is added to this version alone, since there
+/// new versions wait for the user.
 @MainActor
 final class Updater {
     static let interval: TimeInterval = 2 * 60 * 60
@@ -71,8 +76,11 @@ final class Updater {
     var available: Bool { script != nil }
 
     /// Whether to install without asking when nothing would be interrupted (a fresh launch, the last orbit stopping):
-    /// in Automatically mode, once a newer version is staged.
-    var installsByItself: Bool { Self.mode == .automatic && ready }
+    /// in Automatically mode whatever is staged, a new version, Siri support or both. In the other modes only this
+    /// version with Siri support, since Siri support arrives in every mode as an automatic update would.
+    var installsByItself: Bool { Self.mode == .automatic ? staged != nil : addsSiri }
+
+    let siri = SiriSupport()
 
     var onChange: (() -> Void)?
     /// A prepare found something newer and is building it ("Downloading Update…").
@@ -82,9 +90,13 @@ final class Updater {
 
     private let script: URL?
     private let stage = Build.path(.stage)
-    /// Whether a prepare is under way, and whoever waits for it.
-    private var running = false
-    private var waiting: [@MainActor @Sendable (Check) -> Void] = []
+    /// The prepare under way, by whether it rebuilds this version (`installed`), and the ones asked for with
+    /// whoever waits for each.
+    private var running: Bool?
+    private var waiting: [Bool: [@MainActor @Sendable (Check) -> Void]] = [:]
+    /// The last prepare ran with Xcode ready, so only the timer tries Siri support again: a build that failed is
+    /// not retried each time Settings comes to the front.
+    private var triedSiri = false
     private var timer: Timer?
 
     init() {
@@ -93,35 +105,58 @@ final class Updater {
             .flatMap { FileManager.default.isExecutableFile(atPath: $0.path) ? $0 : nil }
     }
 
-    /// A newer version is staged: the stage holds a build of another commit than this one.
-    var ready: Bool {
+    /// The build waiting in the stage when it brings something: its commit and whether it has Siri support. A build
+    /// of this commit with no more Siri support than this one brings nothing, as when build.sh fell back to Orbit
+    /// Local Signing after the Apple Development certificate expired, so it is never installed over this one. The
+    /// update script applies the same rule (`prepare` in scripts/update.sh).
+    var staged: (commit: String, intents: Bool)? {
         guard script != nil,
               FileManager.default.fileExists(atPath: stage.appending(path: "Orbit.app").path),
-              let staged = (try? String(contentsOf: stage.appending(path: "commit"), encoding: .utf8))?.trimmed
-        else { return false }
-        return staged != Build.commit
+              let staged = (try? String(contentsOf: stage.appending(path: "commit"), encoding: .utf8))?.trimmed,
+              staged != Build.identity, staged + " intents" != Build.identity else { return nil }
+        let commit = staged.replacing(" intents", with: "")
+        return (commit, commit != staged)
     }
 
-    /// Polls now, then every interval while Orbit runs. At launch, and again when the mode changes. Not in Manually
-    /// mode.
+    /// A newer version is staged.
+    var ready: Bool { staged.map { $0.commit != Build.commit } ?? false }
+
+    /// The stage holds this version with Siri support added.
+    var addsSiri: Bool { staged.map { $0.commit == Build.commit && $0.intents } ?? false }
+
+    /// Polls now, then every interval while Orbit runs. At launch, and again when the mode changes. In Manually
+    /// mode only while Siri support may still come.
     func start() {
         timer?.invalidate()
         timer = nil
         poll()
-        guard script != nil, Self.mode != .manual else { return }
+        guard script != nil, Self.mode != .manual || !Build.siri else { return }
         timer = Timer.scheduledTimer(withTimeInterval: Self.interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll(due: true) }
         }
         timer?.tolerance = 600
     }
 
-    /// Prepares what is due, at launch and on the timer (`due`). A new version is due every interval, except in
-    /// Manually mode.
+    /// Looks at Xcode and the certificate, then prepares what is due, at launch, on the timer (`due`), after Check
+    /// for Updates and when Orbit or its Settings comes to the front. Siri support is due in every mode once Xcode
+    /// can add it and the stage lacks it; outside Automatically mode it is built for this version alone, and a new
+    /// version waits until it is in. A new version is due every interval, except in Manually mode.
     func poll(due: Bool = false) {
-        guard script != nil, !running, Self.mode != .manual else { return }
-        let checked = (try? stage.appending(path: "checked").resourceValues(forKeys: [.contentModificationDateKey]))?
-            .contentModificationDate ?? .distantPast
-        if due || Date().timeIntervalSince(checked) >= Self.interval { prepare() }
+        siri.look { [weak self] in
+            guard let self else { return }
+            onChange?()
+            guard script != nil, running == nil else { return }
+            let checked = (try? stage.appending(path: "checked").resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            let update = due || Date().timeIntervalSince(checked) >= Self.interval
+            let siriDue = siri.state == .adding && staged?.intents != true && (due || !triedSiri)
+            switch Self.mode {
+            case .automatic: if update || siriDue { prepare() }
+            case _ where siri.state == .adding: if siriDue { prepare(installed: true) }
+            case .downloadOnly: if update { prepare() }
+            case .manual: break
+            }
+        }
     }
 
     enum Check { case done, available, offline, failed }
@@ -144,44 +179,53 @@ final class Updater {
         if (try? process.run()) == nil { then(.failed) }
     }
 
-    /// Fetches and, when there is a newer version, builds it into the stage. `then` gets the result. One prepare
-    /// runs at a time: one asked for meanwhile joins it.
-    func prepare(then: (@MainActor @Sendable (Check) -> Void)? = nil) {
-        waiting += then.map { [$0] } ?? []
-        if !running { begin() }
+    /// Fetches and, when there is something new, a newer version or Siri support, builds it into the stage. With
+    /// `installed`, it builds this version with Siri support instead, which never brings in a new version. `then`
+    /// gets the result. One prepare runs at a time: one asked for meanwhile joins it when it is the same kind,
+    /// else follows it.
+    func prepare(installed: Bool = false, then: (@MainActor @Sendable (Check) -> Void)? = nil) {
+        waiting[installed, default: []] += then.map { [$0] } ?? []
+        if running == nil { start(installed) }
     }
 
-    private func begin() {
-        guard let script else { return finish(.failed) }
-        running = true
-        let process = run(script, ["prepare"]) { [weak self] output in
-            guard output.contains("building") else { return }
+    private func start(_ installed: Bool) {
+        guard let script else { return finish(installed, .failed) }
+        running = installed
+        let process = run(script, ["prepare"] + (installed ? ["--installed"] : [])) { [weak self] output in
+            // a newer version, not this one again with Siri support
+            guard !installed, output.contains("building"), !output.contains("building  \(Build.commit)") else { return }
             Task { @MainActor in self?.building = true; self?.onBuilding?() }
         }
         process.qualityOfService = .userInitiated
         process.terminationHandler = { [weak self] process in
             let status = process.terminationStatus
-            Task { @MainActor in self?.finish(status == 0 ? .done : status == 3 ? .offline : .failed) }
+            Task { @MainActor in self?.finish(installed, status == 0 ? .done : status == 3 ? .offline : .failed) }
         }
-        if (try? process.run()) == nil { finish(.failed) }
+        if (try? process.run()) == nil { finish(installed, .failed) }
     }
 
-    private func finish(_ check: Check) {
+    /// Looks at Xcode again first, since a build that failed at Siri support rules out this version of Xcode.
+    private func finish(_ installed: Bool, _ check: Check) {
         building = false
-        running = false
-        onChange?()
-        let waiters = waiting
-        waiting = []
-        waiters.forEach { $0(check) }
+        siri.look { [weak self] in
+            guard let self else { return }
+            running = nil
+            triedSiri = siri.state == .adding
+            onChange?()
+            waiting.removeValue(forKey: installed)?.forEach { $0(check) }
+            if let next = waiting.keys.first { start(next) }
+        }
     }
 
     /// Starts the installer, which waits for this process to exit; the caller quits right after. Every install goes
     /// through here. `reopen` lists the `orbit://` URLs to hand the new Orbit once it is in place: the requests
-    /// this one was started with, or the windows that were open. The installer brings in the newest commit however
-    /// old the prepared one is.
-    func install(reopen: [String]) {
+    /// this one was started with, or the windows that were open. In Automatically mode, or for an `update` asked
+    /// for, the installer brings in the newest commit however old the prepared one is, with Siri support once Xcode
+    /// can add it, so one install brings both. Otherwise it installs this version with Siri support, never a newer one.
+    func install(reopen: [String], update: Bool = false) {
         guard let script else { return }
-        try? run(script, ["install", "--after", String(getpid())] + reopen).run()
+        let installed = !update && Self.mode != .automatic
+        try? run(script, ["install", "--after", String(getpid())] + (installed ? ["--installed"] : []) + reopen).run()
     }
 
     /// A process for the script with its output appended to Orbit.log. `watch` also sees the output as it arrives.

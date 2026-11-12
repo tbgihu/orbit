@@ -1,9 +1,10 @@
 .PHONY: install update build identity uninstall clean
 
-## make install    build, signed with Orbit's
+## make install    build, signed with your Apple Development certificate if there is one, else with Orbit's
 ##                 signing identity (created here), and install to ~/Applications/Orbit, with the orbit command.
+##                 Without Xcode it offers once to open its App Store page, for Siri and Shortcuts
 install:
-	@zsh -c 'source scripts/lib.sh && require_idle'
+	@zsh -c 'source scripts/lib.sh && require_idle && offer_xcode'
 	@scripts/identity.sh
 	@scripts/build.sh
 	@scripts/install.sh

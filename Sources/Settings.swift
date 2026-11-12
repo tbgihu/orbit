@@ -4,12 +4,13 @@ import AppKit
 enum UpdateActivity: Equatable { case none, checking, downloading, upToDate, offline, failed }
 
 /// Orbit's settings (⌘,): how updates arrive, Check for Updates with its progress and result, the update to
-/// install, the terminal Show Output opens in, Export Configuration and Uninstall Orbit.
+/// install, the terminal Show Output opens in, Siri & Shortcuts, Export Configuration and Uninstall Orbit.
 /// Updates are handled here in place, with no other windows.
 @MainActor
 final class Settings: NSObject, NSWindowDelegate {
     private let perform: (Command) -> Void
     private let updatesAvailable: Bool
+    private let siri: SiriSupport
 
     private let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: true)
     private let mode = NSPopUpButton()
@@ -23,13 +24,18 @@ final class Settings: NSObject, NSWindowDelegate {
     private let progress = NSStackView()
     private var grid = NSGridView()
     private let terminal = NSPopUpButton()
+    /// Where Siri & Shortcuts stands, the steps for an Apple Development certificate when it needs one, and the
+    /// one button it may need.
+    private let siriNote = NSTextField(wrappingLabelWithString: "")
+    private let siriSteps = NSTextField(wrappingLabelWithString: "")
+    private let siriStep = NSButton(title: "", target: nil, action: nil)
     private let export = NSButton(title: "Export Configuration…", target: nil, action: nil)
     /// Greyed out while orbits run, with the note saying why.
     private let uninstall = NSButton(title: "Uninstall Orbit…", target: nil, action: nil)
     private let uninstallNote = NSTextField(labelWithString: "Stop every orbit to uninstall.")
 
-    init(updatesAvailable: Bool, perform: @escaping (Command) -> Void) {
-        (self.perform, self.updatesAvailable) = (perform, updatesAvailable)
+    init(updatesAvailable: Bool, siri: SiriSupport, perform: @escaping (Command) -> Void) {
+        (self.perform, self.updatesAvailable, self.siri) = (perform, updatesAvailable, siri)
         super.init()
         window.title = "Orbit Settings"
         window.isReleasedWhenClosed = false
@@ -60,6 +66,10 @@ final class Settings: NSObject, NSWindowDelegate {
         terminal.target = self
         terminal.action = #selector(terminalChanged)
         fillTerminals()
+        siriNote.preferredMaxLayoutWidth = 240
+        siriSteps.preferredMaxLayoutWidth = 240
+        siriStep.target = self
+        siriStep.action = #selector(siriStepNow)
         export.target = self
         export.action = #selector(exportNow)
         uninstall.target = self
@@ -74,6 +84,9 @@ final class Settings: NSObject, NSWindowDelegate {
             [NSGridCell.emptyContentView, install],
             [NSGridCell.emptyContentView, check],
             [NSTextField(labelWithString: "Terminal:"), terminal],
+            [NSTextField(labelWithString: "Siri & Shortcuts:"), siriNote],
+            [NSGridCell.emptyContentView, siriSteps],
+            [NSGridCell.emptyContentView, siriStep],
             [NSTextField(labelWithString: "Orbits:"), export],
             [NSGridCell.emptyContentView, uninstall],
             [NSGridCell.emptyContentView, uninstallNote],
@@ -83,7 +96,8 @@ final class Settings: NSObject, NSWindowDelegate {
         row(progress).topPadding = 6
         row(progress).isHidden = true                                    // until a check runs or an update is known
         row(install).isHidden = true                                     // until a newer version is known
-        for view in [terminal, export, uninstall] { row(view).topPadding = 14 }
+        for view in [terminal, siriNote, export, uninstall] { row(view).topPadding = 14 }
+        row(siriNote).rowAlignment = .firstBaseline
         row(uninstallNote).isHidden = true                               // until an orbit runs
         terminal.toolTip = "Show Output opens a new window in this terminal."
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -104,6 +118,7 @@ final class Settings: NSObject, NSWindowDelegate {
             check.isEnabled = false
         }
         describe()
+        showSiri(idle: true)
         window.setContentSize(content.fittingSize)
     }
 
@@ -164,7 +179,84 @@ final class Settings: NSObject, NSWindowDelegate {
         row(install).isHidden = update == .none || busy
         install.isEnabled = update.actionable
         install.title = update == .none ? install.title : update.title
+        showSiri(idle: idle)
         window.fitToContent()
+    }
+
+    // MARK: Siri
+
+    /// Settings coming to the front is when Xcode may have just been installed or licensed.
+    func windowDidBecomeKey(_ notification: Notification) { perform(.siri) }
+
+    /// A line on where Siri & Shortcuts stands, and its one step. There is no switch: Orbit adds this support in
+    /// every Updates mode as an automatic update, and macOS turns an app's access off, in System Settings.
+    private func showSiri(idle: Bool) {
+        let state = siri.state
+        let (line, step): (String, String?) = switch state {
+        case .active: ("Available in Siri, Shortcuts and Spotlight. Manage access in System Settings.", nil)
+        case .looking: ("", nil)
+        case .needsXcode: ("Siri & Shortcuts support needs Xcode (free, about 10 GB from the App Store).", "Install Xcode…")
+        case .unlicensed: ("Siri & Shortcuts support needs Xcode’s licence: open Xcode once and accept the licence.",
+                           "Open Xcode")
+        case .needsCertificate: ("Siri & Shortcuts support needs an Apple Development certificate, which Xcode "
+                                 + "creates for free:", "Open Xcode")
+        case .failed: ("This version of Xcode couldn’t add Siri & Shortcuts support, so Orbit waits for the next "
+                       + "version of Xcode. Details are in \(Runtime.logFile("Orbit").abbreviatingTilde).", nil)
+        case .adding where !updatesAvailable:
+            ("Xcode is ready. Run make install in Orbit’s folder to add Siri & Shortcuts support.", nil)
+        case .adding where idle: ("Siri & Shortcuts support is added when no orbit is running.", "Add Now")
+        case .adding: ("Siri & Shortcuts support is added once the running orbits stop.", "Add Now")
+        }
+        siriNote.stringValue = line
+        row(siriNote).isHidden = line.isEmpty                            // until Xcode has been looked for
+        siriSteps.attributedStringValue = state == .needsCertificate ? numbered(certificateSteps) : NSAttributedString()
+        row(siriSteps).isHidden = state != .needsCertificate
+        siriStep.title = step ?? ""
+        siriStep.isEnabled = state != .adding || idle
+        row(siriStep).isHidden = step == nil
+    }
+
+    /// How to create an Apple Development certificate in Xcode, and what follows. Xcode documents no way to open
+    /// its Apple Accounts settings directly, so Open Xcode opens Xcode and the steps start from there.
+    private var certificateSteps: [String] {
+        [
+            "Open Xcode, choose Xcode > Settings… in the menu bar, click Apple Accounts in the sidebar, then click "
+                + "Sign In… and sign in with your Apple Account. A free one is enough.",
+            "Still in Apple Accounts, select your account, whose team is listed as Personal Team, and click Manage "
+                + "Certificates… to open a window. There, click + at the bottom left, choose Apple Development, then "
+                + "click Done.",
+            (updatesAvailable ? "Orbit then adds Siri & Shortcuts support when no orbit is running."
+                              : "Then run make install in Orbit’s folder to add Siri & Shortcuts support.")
+                + " If macOS asks whether codesign may use the new key, enter your login password and click "
+                + "Always Allow.",
+            "macOS asks once more for the access your orbits had, such as to a folder, since Orbit’s signature "
+                + "changes.",
+        ]
+    }
+
+    /// Steps as a numbered list, in the small font of the notes, each number hanging in its own column.
+    private func numbered(_ steps: [String]) -> NSAttributedString {
+        let font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        let indent = ceil(("\(steps.count)." as NSString).size(withAttributes: [.font: font]).width) + 5
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.tabStops = [NSTextTab(textAlignment: .left, location: indent)]
+        paragraph.headIndent = indent
+        paragraph.paragraphSpacing = 4
+        let text = steps.enumerated().map { "\($0.offset + 1).\t\($0.element)" }.joined(separator: "\n")
+        return NSAttributedString(string: text, attributes: [.font: font, .paragraphStyle: paragraph,
+                                                             .foregroundColor: NSColor.labelColor])
+    }
+
+    /// Install Xcode… opens Xcode's page in the App Store, Open Xcode opens Xcode for its licence or the certificate,
+    /// and Add Now adds Siri support at once.
+    @objc private func siriStepNow() {
+        switch (siri.state, siri.xcode?.app) {
+        case (.adding, _):
+            siriStep.isEnabled = false
+            perform(.addSiri)
+        case (.unlicensed, let app?), (.needsCertificate, let app?): NSWorkspace.shared.open(app)
+        default: URL(string: Build.value(.xcode)).map { _ = NSWorkspace.shared.open($0) }
+        }
     }
 
     // MARK: Terminal

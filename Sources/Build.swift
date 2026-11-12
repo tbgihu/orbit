@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Orbit's own Info.plist keys, written by build.sh for the agent and by Launchers for each launcher.
 enum Build {
@@ -14,6 +15,8 @@ enum Build {
         case task = "OrbitTask"
         /// A launcher's badge (`Glyph.Content.key`), so a changed badge gets a new icon.
         case mark = "OrbitMark"
+        /// True in a build that has the App Intents metadata, so Siri and Shortcuts find its intents (`Intents`).
+        case intents = "OrbitIntents"
 
         // What the scripts need to know too. scripts/lib.sh names each once and build.sh copies them here, so
         // Orbit and the scripts can't differ. A launcher carries its agent's.
@@ -29,6 +32,10 @@ enum Build {
         case logs = "OrbitLogs"
         /// Launch Services' own tool, which can forget an app.
         case lsregister = "OrbitLSRegister"
+        /// Xcode's page in the App Store.
+        case xcode = "OrbitXcode"
+        /// What Xcode was last found to be, and the files that can change that (`xcode` in scripts/lib.sh).
+        case xcodeVerdict = "OrbitXcodeVerdict"
     }
 
     /// This bundle's value.
@@ -48,6 +55,27 @@ enum Build {
 
     static let identifier = value(.identifier)
 
+    /// Whether this build has the intents' metadata.
+    static let intents = Bundle.main.object(forInfoDictionaryKey: Key.intents.rawValue) as? Bool ?? false
+
+    /// The Team ID in this build's signature, which an Apple Development certificate gives it (`development_identity`
+    /// in scripts/lib.sh). nil when signed with Orbit Local Signing or ad hoc.
+    static let team: String? = {
+        var code: SecStaticCode?, info: CFDictionary?
+        guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &code) == errSecSuccess, let code,
+              SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess
+        else { return nil }
+        return (info as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String
+    }()
+
+    /// Whether this build has Siri support: the intents' metadata, and a Team ID, without which macOS refuses to
+    /// run the intents.
+    static let siri = intents && team != nil
+
     /// The commit it was built from, without the "+".
     static let commit = (Build[.commit] ?? "").trimmingCharacters(in: ["+"])
+
+    /// What tells this build from another: its commit, and whether it has Siri support. The update stage names
+    /// its build the same way (`identity` in scripts/lib.sh).
+    static let identity = commit + (siri ? " intents" : "")
 }

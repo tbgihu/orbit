@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Removes all of Orbit's code and data from this Mac: the app, its launchers and the orbit command, the staged
 # update, the clone Orbit was installed from (Info.plist `OrbitSource`, else the clone this script is in), your
-# orbits (orbits.json), settings, privacy permissions, Orbit's signing identity, caches and logs.
+# orbits (orbits.json), settings, privacy permissions, Orbit's signing identity, caches and logs. Apple's
+# intermediate certificate stays if Orbit added it (`development_identity` in lib.sh), since Xcode uses it too.
 # Runs only when no orbit runs, and asks first.
 #
 #   uninstall.sh          `make uninstall`: lists what it deletes and asks to confirm. With no terminal on stdin
@@ -58,6 +59,7 @@ if ! $yes; then
   [[ -n $clone ]] && print "      and the clone Orbit was installed from, $(tilde $clone), with everything in it"
   print "    your orbits: $(tilde $config)"
   print "    Orbit's settings, privacy permissions, signing identity, caches and logs"
+  print "  Apple's intermediate certificate stays, since Xcode uses it too."
   read -q "?  Delete all of this? [y/N] " && answer=0 || answer=$?
   print
   (( answer == 0 )) || { print "  nothing changed"; exit 1 }

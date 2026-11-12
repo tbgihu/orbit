@@ -451,7 +451,8 @@ enum CLI {
 enum Internal: String {
     /// `watchdog <pid>` blocks until that process (the agent) ends, then stops the orbits it left.
     case watchdog
-    /// `sync` creates or removes the Spotlight launchers to match orbits.json (installed Orbit only).
+    /// `sync` creates or removes the Spotlight launchers to match orbits.json (installed Orbit only), and tells
+    /// Siri of the orbits.
     case sync
     /// `icon <text:… | symbol:… | cards:…> <out.icns>` draws an icon; build.sh makes Orbit's own with it.
     case icon
@@ -471,6 +472,7 @@ enum Internal: String {
             let orbits: [OrbitSpec]
             do { orbits = try Config.load(Config.file) } catch CocoaError.fileReadNoSuchFile { orbits = [] }
             Launchers.sync(orbits)
+            Intents.refresh(orbits)
         case (.icon, 2):
             try Glyph.writeICNS(Glyph.Content(key: arguments[0]), to: URL(filePath: arguments[1]))
         default:

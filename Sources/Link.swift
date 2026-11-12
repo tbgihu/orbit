@@ -31,7 +31,7 @@ struct Report: Codable {
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
-    /// The orbit and its state in one line, as the command line says it.
+    /// The orbit and its state in one line, as the command line and Siri say it.
     var sentence: String { "\(name): \(status)" }
 
     @MainActor init(_ orbit: OrbitSpec, _ job: Job?) {

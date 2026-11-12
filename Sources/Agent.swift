@@ -57,6 +57,8 @@ enum Command {
     case checkForUpdates, updateModeChanged
     /// Restart to Update, or Download and Install.
     case update
+    /// Uninstall Orbit, confirmed in Settings: quits, then everything Orbit put on this Mac is removed.
+    case uninstall
     case quit
     case windowClosed, settingsClosed, sheetClosed
 
@@ -339,6 +341,9 @@ final class Agent: NSObject, NSApplicationDelegate {
             updater.start()
             showUpdate()
         case .update: restartToUpdate()
+        case .uninstall:
+            guard jobs.running.isEmpty, Uninstall.start() else { return }
+            quit(quietly: true)
         case .quit: NSApp.terminate(nil)
         case .windowClosed:
             window = nil
@@ -479,6 +484,7 @@ final class Agent: NSObject, NSApplicationDelegate {
         let file = NSMenu(title: "File")
         file.addItem(withTitle: "New Orbit…", action: #selector(newOrbit), keyEquivalent: "n").target = self
         file.addItem(withTitle: "Open Configuration File", action: #selector(openConfiguration), keyEquivalent: "").target = self
+        file.addItem(withTitle: "Export Configuration…", action: #selector(exportConfiguration), keyEquivalent: "").target = self
         file.addItem(.separator())
         file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         // The standard Edit menu. Its key equivalents are what make ⌘C, ⌘V, ⌘Z and the rest work in every text
@@ -505,9 +511,13 @@ final class Agent: NSObject, NSApplicationDelegate {
 
     @objc private func openConfiguration() { Config.edit() }
 
+    @objc private func exportConfiguration() {
+        if let window = NSApp.mainWindow ?? NSApp.keyWindow { Config.export(on: window) }
+    }
+
     /// Refreshes the update section of Settings.
     private func showUpdate() {
-        settings?.show(update: updateState, activity: updateActivity)
+        settings?.show(update: updateState, activity: updateActivity, idle: jobs.running.isEmpty)
     }
 
     /// Check for Updates, from Settings or the Orbit menu (which opens Settings). Checks now whatever the mode and
@@ -531,5 +541,12 @@ final class Agent: NSObject, NSApplicationDelegate {
             self.showUpdate()
         }
         if Updater.mode == .manual { updater.check(then: report) } else { updater.prepare(then: report) }
+    }
+}
+
+extension Agent: NSMenuItemValidation {
+    /// Export Configuration… needs a file to export.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.action != #selector(exportConfiguration) || Config.exists
     }
 }

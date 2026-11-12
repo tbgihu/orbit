@@ -4,7 +4,7 @@ import AppKit
 enum UpdateActivity: Equatable { case none, checking, downloading, upToDate, offline, failed }
 
 /// Orbit's settings (⌘,): how updates arrive, Check for Updates with its progress and result, the update to
-/// install and the terminal Show Output opens in.
+/// install, the terminal Show Output opens in, Export Configuration and Uninstall Orbit.
 /// Updates are handled here in place, with no other windows.
 @MainActor
 final class Settings: NSObject, NSWindowDelegate {
@@ -23,6 +23,10 @@ final class Settings: NSObject, NSWindowDelegate {
     private let progress = NSStackView()
     private var grid = NSGridView()
     private let terminal = NSPopUpButton()
+    private let export = NSButton(title: "Export Configuration…", target: nil, action: nil)
+    /// Greyed out while orbits run, with the note saying why.
+    private let uninstall = NSButton(title: "Uninstall Orbit…", target: nil, action: nil)
+    private let uninstallNote = NSTextField(labelWithString: "Stop every orbit to uninstall.")
 
     init(updatesAvailable: Bool, perform: @escaping (Command) -> Void) {
         (self.perform, self.updatesAvailable) = (perform, updatesAvailable)
@@ -56,6 +60,12 @@ final class Settings: NSObject, NSWindowDelegate {
         terminal.target = self
         terminal.action = #selector(terminalChanged)
         fillTerminals()
+        export.target = self
+        export.action = #selector(exportNow)
+        uninstall.target = self
+        uninstall.action = #selector(confirmUninstall)
+        uninstallNote.textColor = .secondaryLabelColor
+        uninstallNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
 
         grid = NSGridView(views: [
             [NSTextField(labelWithString: "Updates:"), mode],
@@ -64,13 +74,17 @@ final class Settings: NSObject, NSWindowDelegate {
             [NSGridCell.emptyContentView, install],
             [NSGridCell.emptyContentView, check],
             [NSTextField(labelWithString: "Terminal:"), terminal],
+            [NSTextField(labelWithString: "Orbits:"), export],
+            [NSGridCell.emptyContentView, uninstall],
+            [NSGridCell.emptyContentView, uninstallNote],
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowSpacing = 8
         row(progress).topPadding = 6
         row(progress).isHidden = true                                    // until a check runs or an update is known
         row(install).isHidden = true                                     // until a newer version is known
-        for view in [terminal] { row(view).topPadding = 14 }
+        for view in [terminal, export, uninstall] { row(view).topPadding = 14 }
+        row(uninstallNote).isHidden = true                               // until an orbit runs
         terminal.toolTip = "Show Output opens a new window in this terminal."
         grid.translatesAutoresizingMaskIntoConstraints = false
         let content = NSView()
@@ -126,7 +140,13 @@ final class Settings: NSObject, NSWindowDelegate {
     /// Updates the update section in place: a check's progress and result, and once a newer version is known, its
     /// summary and button (Download and Install, or Restart to Update once downloaded), greyed while it waits for
     /// the orbits to stop. Check for Updates is greyed while a check runs.
-    func show(update: UpdateState, activity: UpdateActivity) {
+    /// Export needs a file to copy. Uninstall is greyed while an orbit runs (`idle` false) or when this build
+    /// has no uninstaller (it runs outside its bundle).
+    func show(update: UpdateState, activity: UpdateActivity, idle: Bool) {
+        export.isEnabled = Config.exists
+        export.toolTip = export.isEnabled ? nil : "There is no orbits.json yet."
+        uninstall.isEnabled = idle && Uninstall.script != nil
+        row(uninstallNote).isHidden = idle
         let busy = activity == .checking || activity == .downloading
         check.isEnabled = !busy && mode.isEnabled
         busy ? bar.startAnimation(nil) : bar.stopAnimation(nil)
@@ -190,6 +210,42 @@ final class Settings: NSObject, NSWindowDelegate {
                 Defaults.terminal = id
             }
         }
+    }
+
+    // MARK: Export and uninstall
+
+    @objc private func exportNow() { Config.export(on: window) }
+
+    /// Asks before anything is removed. Export… saves the orbits, then asks again.
+    @objc private func confirmUninstall() {
+        uninstallAlert().beginSheetModal(for: window) { [weak self] response in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                switch response {
+                case .alertSecondButtonReturn: self.perform(.uninstall)
+                case .alertThirdButtonReturn: Config.export(on: self.window) { [weak self] in self?.confirmUninstall() }
+                default: break
+                }
+            }
+        }
+    }
+
+    /// Uninstall is marked destructive, so no button answers Return and Escape cancels. Export… is there when
+    /// there are orbits to keep.
+    func uninstallAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Uninstall Orbit and delete all its code and data?"
+        let code = Build[.source]
+            .map { "Orbit, its Spotlight launchers and the folder you cloned (\($0.abbreviatingTilde))" }
+            ?? "Orbit and its Spotlight launchers"
+        alert.informativeText = "This deletes Orbit’s code: \(code). It also deletes your orbits "
+            + "(\(Config.file.path.abbreviatingTilde)), settings, logs and Orbit’s signing identity. Export your orbits "
+            + "first to keep them."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Uninstall").hasDestructiveAction = true
+        if Config.exists { alert.addButton(withTitle: "Export…") }
+        return alert
     }
 
     func windowWillClose(_ notification: Notification) { perform(.settingsClosed) }

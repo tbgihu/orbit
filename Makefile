@@ -1,4 +1,4 @@
-.PHONY: install update build identity clean
+.PHONY: install update build identity uninstall clean
 
 ## make install    build, signed with Orbit's
 ##                 signing identity (created here), and install to ~/Applications/Orbit, with the orbit command.
@@ -19,6 +19,10 @@ build:
 ## make identity   create the local signing certificate
 identity:
 	@scripts/identity.sh
+
+## make uninstall  ask, then delete Orbit, the clone it was installed from, your orbits and all of Orbit's data
+uninstall:
+	@scripts/uninstall.sh
 
 clean:
 	@rm -rf build

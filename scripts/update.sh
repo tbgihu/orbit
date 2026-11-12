@@ -62,7 +62,7 @@ prepare() {
 
   print "  building  $target"
   rm -rf $stage/Orbit.app $stage/commit
-  git worktree prune                                              # forget one that was deleted
+  git worktree prune                                              # forget one that was deleted, by an uninstall too
   git worktree add --quiet --detach $stage/src $target
   if ! (repo=$PWD; cd $stage/src && ORBIT_SOURCE=$repo scripts/build.sh >/dev/null); then
     git worktree remove --force $stage/src

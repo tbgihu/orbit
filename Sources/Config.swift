@@ -470,6 +470,30 @@ enum Config {
 
     static var exists: Bool { FileManager.default.fileExists(atPath: file.path) }
 
+    /// Export Configuration…: a save panel as a sheet on `window`, then a copy of the file where it says. `then`
+    /// runs once the panel, and the alert if the copy failed, are closed.
+    static func export(on window: NSWindow, then: @escaping @MainActor () -> Void = {}) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = file.lastPathComponent
+        panel.allowedContentTypes = [.json]
+        panel.beginSheetModal(for: window) { response in
+            MainActor.assumeIsolated {
+                guard response == .OK, let destination = panel.url else { return then() }
+                do {
+                    try copy(to: destination)
+                    then()
+                } catch {
+                    NSAlert(error: error).beginSheetModal(for: window) { _ in MainActor.assumeIsolated(then) }
+                }
+            }
+        }
+    }
+
+    /// Copies the file as it is, byte for byte, errors and all. The copy appears whole or not at all.
+    static func copy(to destination: URL) throws {
+        try Data(contentsOf: file).write(to: destination, options: .atomic)
+    }
+
     /// A decoding error as a sentence saying where in the file it is and what went wrong.
     static func describe(_ error: Error) -> String {
         switch error {

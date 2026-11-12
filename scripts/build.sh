@@ -47,6 +47,7 @@ plutil -replace CFBundleVersion -string "$version" $plist
 plutil -insert OrbitCommit -string "$commit" $plist
 [[ -n $origin ]] && plutil -insert OrbitSource -string "$origin" $plist
 $built/Contents/MacOS/Orbit internal icon "" $built/Contents/Resources/AppIcon.icns
+cp scripts/lib.sh scripts/uninstall.sh $built/Contents/Resources   # used without the clone
 
 codesign --force --sign "$sign_id" $sign_args --timestamp=none $built 2>/dev/null \
   || { print -u2 "  signing with \"$sign_name\" failed${sign_args:+: \`make identity\` recreates Orbit's identity}"
